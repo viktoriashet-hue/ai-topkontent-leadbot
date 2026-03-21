@@ -1,6 +1,5 @@
 """
 @ai_topkontentbot — Lead Bot
-Сбор контактов в обмен на подарок
 """
 
 import logging
@@ -19,17 +18,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8142618101:AAGpKeRBP6oQrVUxIMhMBkQAahhl11ZIkyA")
 ADMIN_IDS = [327487258]
 
-# States
 WAITING_CONSENT = 1
 WAITING_KEYWORD = 2
 WAITING_EMAIL = 3
-
-# Admin states
-ADMIN_SET_KEYWORD = 10
-ADMIN_SET_GIFT = 11
-ADMIN_BROADCAST = 12
-
-# ─── DATABASE ────────────────────────────────────────────────
 
 def get_db():
     conn = sqlite3.connect("leads.db")
@@ -38,41 +29,20 @@ def get_db():
 
 def init_db():
     conn = get_db()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS leads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            email TEXT,
-            keyword TEXT,
-            joined_at TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS keywords (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            word TEXT UNIQUE,
-            gift_link TEXT,
-            created_at TEXT,
-            is_active INTEGER DEFAULT 1
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS broadcasts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            message TEXT,
-            sent_at TEXT,
-            sent_count INTEGER DEFAULT 0
-        )
-    """)
-    # Default keyword if none exist
+    conn.execute("""CREATE TABLE IF NOT EXISTS leads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER, username TEXT, first_name TEXT,
+        email TEXT, keyword TEXT, joined_at TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS keywords (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        word TEXT UNIQUE, gift_link TEXT, created_at TEXT, is_active INTEGER DEFAULT 1)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS broadcasts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message TEXT, sent_at TEXT, sent_count INTEGER DEFAULT 0)""")
     existing = conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
     if existing == 0:
-        conn.execute("""
-            INSERT INTO keywords (word, gift_link, created_at, is_active)
-            VALUES (?, ?, ?, 1)
-        """, ("подарок", "https://your-gift-link.com", datetime.now().strftime("%Y-%m-%d %H:%M")))
+        conn.execute("INSERT INTO keywords (word, gift_link, created_at, is_active) VALUES (?, ?, ?, 1)",
+                     ("подарок", "https://your-gift-link.com", datetime.now().strftime("%Y-%m-%d %H:%M")))
     conn.commit()
     conn.close()
 
@@ -84,20 +54,20 @@ def get_keywords():
 
 def get_gift_by_keyword(word):
     conn = get_db()
-    row = conn.execute(
-        "SELECT gift_link FROM keywords WHERE LOWER(word) = LOWER(?) AND is_active = 1",
-        (word.strip(),)
-    ).fetchone()
+    # SQLite LOWER() не работает с кириллицей — сравниваем через Python
+    rows = conn.execute("SELECT word, gift_link FROM keywords WHERE is_active = 1").fetchall()
     conn.close()
-    return row["gift_link"] if row else None
+    word_lower = word.strip().lower()
+    for row in rows:
+        if row["word"].lower() == word_lower:
+            return row["gift_link"]
+    return None
 
 def add_keyword(word, gift_link):
     conn = get_db()
     try:
-        conn.execute("""
-            INSERT OR REPLACE INTO keywords (word, gift_link, created_at, is_active)
-            VALUES (?, ?, ?, 1)
-        """, (word.strip().lower(), gift_link, datetime.now().strftime("%Y-%m-%d %H:%M")))
+        conn.execute("INSERT OR REPLACE INTO keywords (word, gift_link, created_at, is_active) VALUES (?, ?, ?, 1)",
+                     (word.strip().lower(), gift_link, datetime.now().strftime("%Y-%m-%d %H:%M")))
         conn.commit()
         return True
     except Exception as e:
@@ -108,27 +78,28 @@ def add_keyword(word, gift_link):
 
 def deactivate_keyword(word):
     conn = get_db()
-    conn.execute("UPDATE keywords SET is_active = 0 WHERE LOWER(word) = LOWER(?)", (word,))
+    rows = conn.execute("SELECT id, word FROM keywords WHERE is_active = 1").fetchall()
+    word_lower = word.strip().lower()
+    for row in rows:
+        if row["word"].lower() == word_lower:
+            conn.execute("UPDATE keywords SET is_active = 0 WHERE id = ?", (row["id"],))
+            break
     conn.commit()
     conn.close()
 
 def save_lead(telegram_id, username, first_name, email, keyword):
     conn = get_db()
-    conn.execute("""
-        INSERT INTO leads (telegram_id, username, first_name, email, keyword, joined_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (telegram_id, username or "", first_name or "", email, keyword, datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.execute("INSERT INTO leads (telegram_id, username, first_name, email, keyword, joined_at) VALUES (?, ?, ?, ?, ?, ?)",
+                 (telegram_id, username or "", first_name or "", email, keyword, datetime.now().strftime("%Y-%m-%d %H:%M")))
     conn.commit()
     conn.close()
 
 def already_got_gift(telegram_id, keyword):
     conn = get_db()
-    row = conn.execute(
-        "SELECT id FROM leads WHERE telegram_id = ? AND LOWER(keyword) = LOWER(?)",
-        (telegram_id, keyword)
-    ).fetchone()
+    rows = conn.execute("SELECT keyword FROM leads WHERE telegram_id = ?", (telegram_id,)).fetchall()
     conn.close()
-    return row is not None
+    keyword_lower = keyword.strip().lower()
+    return any(r["keyword"].lower() == keyword_lower for r in rows)
 
 def get_all_leads():
     conn = get_db()
@@ -139,179 +110,115 @@ def get_all_leads():
 def get_stats():
     conn = get_db()
     total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
-    today = conn.execute(
-        "SELECT COUNT(*) FROM leads WHERE joined_at LIKE ?",
-        (datetime.now().strftime("%Y-%m-%d") + "%",)
-    ).fetchone()[0]
-    by_keyword = conn.execute(
-        "SELECT keyword, COUNT(*) as cnt FROM leads GROUP BY keyword ORDER BY cnt DESC"
-    ).fetchall()
+    today = conn.execute("SELECT COUNT(*) FROM leads WHERE joined_at LIKE ?",
+                         (datetime.now().strftime("%Y-%m-%d") + "%",)).fetchone()[0]
+    by_keyword = conn.execute("SELECT keyword, COUNT(*) as cnt FROM leads GROUP BY keyword ORDER BY cnt DESC").fetchall()
     broadcasts = conn.execute("SELECT COUNT(*) FROM broadcasts").fetchone()[0]
     conn.close()
     return {"total": total, "today": today, "by_keyword": by_keyword, "broadcasts": broadcasts}
 
-# ─── USER FLOW ───────────────────────────────────────────────
+def admin_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
+         InlineKeyboardButton("👥 База лидов", callback_data="admin_leads")],
+        [InlineKeyboardButton("🔑 Кодовые слова", callback_data="admin_keywords"),
+         InlineKeyboardButton("➕ Добавить слово", callback_data="admin_addkw")],
+        [InlineKeyboardButton("📨 Сделать рассылку", callback_data="admin_broadcast")],
+    ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-
     if user.id in ADMIN_IDS:
         stats = get_stats()
-        keyboard = [
-            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
-             InlineKeyboardButton("👥 База лидов", callback_data="admin_leads")],
-            [InlineKeyboardButton("🔑 Кодовые слова", callback_data="admin_keywords"),
-             InlineKeyboardButton("➕ Добавить слово", callback_data="admin_addkw")],
-            [InlineKeyboardButton("📨 Сделать рассылку", callback_data="admin_broadcast")],
-        ]
         await update.message.reply_text(
             f"👑 <b>Панель управления</b>\n\n"
             f"👥 Лидов в базе: <b>{stats['total']}</b>\n"
             f"📅 Сегодня пришло: <b>{stats['today']}</b>\n"
             f"🔑 Активных слов: <b>{len(get_keywords())}</b>\n\n"
             f"Выбери действие 👇",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+            parse_mode="HTML", reply_markup=admin_menu_keyboard())
         return ConversationHandler.END
 
     keyboard = [
         [InlineKeyboardButton("✅ Принимаю условия", callback_data="consent_yes")],
-        [InlineKeyboardButton("❌ Нет, не согласна", callback_data="consent_no")],
+        [InlineKeyboardButton("❌ Нет, спасибо", callback_data="consent_no")],
     ]
     await update.message.reply_text(
         f"👋 Привет, {user.first_name}!\n\n"
-        f"Этот бот собирает контакты и отправляет полезные материалы.\n\n"
+        f"Этот бот отправляет полезные материалы по контенту.\n\n"
         f"📌 Нажимая <b>«Принимаю условия»</b>, ты соглашаешься получать "
-        f"сообщения и рассылки от этого бота.\n\n"
-        f"Продолжим?",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+        f"сообщения и рассылки от этого бота.\n\nПродолжим?",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     return WAITING_CONSENT
 
 async def consent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     if query.data == "consent_yes":
-        await query.edit_message_text(
-            "🎉 Отлично!\n\n"
-            "Напиши кодовое слово, чтобы получить подарок 🎁",
-            parse_mode="HTML"
-        )
+        await query.edit_message_text("🎉 Отлично!\n\nНапиши кодовое слово, чтобы получить подарок 🎁")
         return WAITING_KEYWORD
     else:
-        await query.edit_message_text(
-            "Хорошо, понял. Если передумаешь — напиши /start 👋"
-        )
+        await query.edit_message_text("Хорошо! Если передумаешь — напиши /start 👋")
         return ConversationHandler.END
 
 async def handle_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     gift_link = get_gift_by_keyword(text)
-
     if gift_link:
-        # Check if already received this gift
         if already_got_gift(update.effective_user.id, text):
-            await update.message.reply_text(
-                f"🎁 Ты уже получал(а) подарок по этому слову!\n\n"
-                f"Вот ссылка снова: {gift_link}"
-            )
+            await update.message.reply_text(f"🎁 Ты уже получал(а) подарок по этому слову!\n\nВот ссылка снова: {gift_link}")
             return ConversationHandler.END
-
         context.user_data["keyword"] = text
         context.user_data["gift_link"] = gift_link
         await update.message.reply_text(
-            "✅ Верно! Почти готово.\n\n"
-            "📧 Напиши свой <b>email</b> — и сразу получишь подарок:",
-            parse_mode="HTML"
-        )
+            "✅ Верно! Почти готово.\n\n📧 Напиши свой <b>email</b> — и сразу получишь подарок:",
+            parse_mode="HTML")
         return WAITING_EMAIL
     else:
-        await update.message.reply_text(
-            "🤔 Не знаю такого кодового слова. Попробуй ещё раз!\n"
-            "Или напиши /start чтобы начать заново."
-        )
+        await update.message.reply_text("🤔 Не знаю такого кодового слова. Попробуй ещё раз!")
         return WAITING_KEYWORD
 
 async def handle_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = update.message.text.strip()
     user = update.effective_user
-
     if "@" not in email or "." not in email.split("@")[-1]:
-        await update.message.reply_text(
-            "⚠️ Похоже email введён неверно. Попробуй ещё раз:\n"
-            "Пример: name@gmail.com"
-        )
+        await update.message.reply_text("⚠️ Похоже email введён неверно.\nПример: name@gmail.com")
         return WAITING_EMAIL
-
     keyword = context.user_data.get("keyword", "")
     gift_link = context.user_data.get("gift_link", "")
-
-    save_lead(
-        telegram_id=user.id,
-        username=user.username,
-        first_name=user.first_name,
-        email=email,
-        keyword=keyword
-    )
-
-    await update.message.reply_text(
-        f"🎁 <b>Вот твой подарок!</b>\n\n"
-        f"{gift_link}\n\n"
-        f"Сохрани ссылку 💛\n"
-        f"Если будут вопросы — всегда здесь!",
-        parse_mode="HTML"
-    )
-
-    # Notify admin
+    save_lead(user.id, user.username, user.first_name, email, keyword)
+    await update.message.reply_text(f"🎁 <b>Вот твой подарок!</b>\n\n{gift_link}\n\nСохрани ссылку 💛", parse_mode="HTML")
     for admin_id in ADMIN_IDS:
         try:
             tg_link = f"@{user.username}" if user.username else f"id{user.id}"
             await context.bot.send_message(
                 chat_id=admin_id,
-                text=f"🔔 <b>Новый лид!</b>\n"
-                     f"👤 {user.first_name} ({tg_link})\n"
-                     f"📧 {email}\n"
-                     f"🔑 Слово: <b>{keyword}</b>\n"
-                     f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}",
-                parse_mode="HTML"
-            )
+                text=f"🔔 <b>Новый лид!</b>\n👤 {user.first_name} ({tg_link})\n📧 {email}\n🔑 Слово: <b>{keyword}</b>\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                parse_mode="HTML")
         except Exception as e:
-            logger.warning(f"Не удалось уведомить админа {admin_id}: {e}")
+            logger.warning(f"Не удалось уведомить админа: {e}")
+    return ConversationHandler.END
 
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["admin_state"] = None
+    await update.message.reply_text("Отменил. Напиши /start чтобы начать заново.")
     return ConversationHandler.END
 
 async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     if query.from_user.id not in ADMIN_IDS:
         return
 
-    def admin_keyboard():
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
-             InlineKeyboardButton("👥 База лидов", callback_data="admin_leads")],
-            [InlineKeyboardButton("🔑 Кодовые слова", callback_data="admin_keywords"),
-             InlineKeyboardButton("➕ Добавить слово", callback_data="admin_addkw")],
-            [InlineKeyboardButton("📨 Сделать рассылку", callback_data="admin_broadcast")],
-        ])
-
     if query.data == "admin_stats":
         stats = get_stats()
-        text = (
-            f"📊 <b>Статистика</b>\n\n"
-            f"👥 Всего лидов: <b>{stats['total']}</b>\n"
-            f"📅 Сегодня: <b>{stats['today']}</b>\n"
-            f"📨 Рассылок: <b>{stats['broadcasts']}</b>\n"
-        )
+        text = (f"📊 <b>Статистика</b>\n\n👥 Всего лидов: <b>{stats['total']}</b>\n"
+                f"📅 Сегодня: <b>{stats['today']}</b>\n📨 Рассылок: <b>{stats['broadcasts']}</b>\n")
         if stats["by_keyword"]:
             text += "\n🔑 <b>По кодовым словам:</b>\n"
             for row in stats["by_keyword"]:
                 text += f"  • <b>{row['keyword']}</b> — {row['cnt']} чел.\n"
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_menu_keyboard())
 
     elif query.data == "admin_leads":
         leads = get_all_leads()[:10]
@@ -322,7 +229,7 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             for i, lead in enumerate(leads, 1):
                 tg = f"@{lead['username']}" if lead['username'] else f"id{lead['telegram_id']}"
                 text += f"{i}. {lead['first_name']} ({tg})\n   📧 {lead['email']} | 🔑 {lead['keyword']} | {lead['joined_at']}\n\n"
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_menu_keyboard())
 
     elif query.data == "admin_keywords":
         keywords = get_keywords()
@@ -332,42 +239,33 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             text = "🔑 <b>Активные кодовые слова:</b>\n\n"
             for kw in keywords:
                 text += f"• <b>{kw['word']}</b>\n  🎁 {kw['gift_link']}\n\n"
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_menu_keyboard())
 
     elif query.data == "admin_addkw":
         await query.edit_message_text(
             "🔑 Напиши новое кодовое слово:\n(например: <code>контент2024</code>)\n\nИли /cancel для отмены",
-            parse_mode="HTML"
-        )
+            parse_mode="HTML")
         context.user_data["admin_state"] = "waiting_new_keyword"
 
     elif query.data == "admin_broadcast":
         stats = get_stats()
         await query.edit_message_text(
-            f"📨 <b>Рассылка</b>\n\n"
-            f"В базе: <b>{stats['total']}</b> человек\n\n"
-            f"Напиши текст сообщения и я отправлю всем.\n"
-            f"Или /cancel для отмены:",
-            parse_mode="HTML"
-        )
+            f"📨 <b>Рассылка</b>\n\nВ базе: <b>{stats['total']}</b> человек\n\n"
+            f"Напиши текст сообщения и я отправлю всем.\nИли /cancel для отмены:",
+            parse_mode="HTML")
         context.user_data["admin_state"] = "waiting_broadcast"
 
-
 async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles text input for admin inline flows (addkeyword, broadcast)"""
     if update.effective_user.id not in ADMIN_IDS:
         return
-
     state = context.user_data.get("admin_state")
 
     if state == "waiting_new_keyword":
         context.user_data["new_keyword"] = update.message.text.strip().lower()
         context.user_data["admin_state"] = "waiting_new_gift"
         await update.message.reply_text(
-            f"✅ Слово: <b>{context.user_data['new_keyword']}</b>\n\n"
-            f"Теперь напиши ссылку на подарок для этого слова:",
-            parse_mode="HTML"
-        )
+            f"✅ Слово: <b>{context.user_data['new_keyword']}</b>\n\nТеперь напиши ссылку на подарок:",
+            parse_mode="HTML")
 
     elif state == "waiting_new_gift":
         gift_link = update.message.text.strip()
@@ -375,22 +273,12 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if add_keyword(keyword, gift_link):
             context.user_data["admin_state"] = None
             stats = get_stats()
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
-                 InlineKeyboardButton("👥 База лидов", callback_data="admin_leads")],
-                [InlineKeyboardButton("🔑 Кодовые слова", callback_data="admin_keywords"),
-                 InlineKeyboardButton("➕ Добавить слово", callback_data="admin_addkw")],
-                [InlineKeyboardButton("📨 Сделать рассылку", callback_data="admin_broadcast")],
-            ])
             await update.message.reply_text(
-                f"✅ <b>Добавлено!</b>\n\n"
-                f"🔑 Слово: <b>{keyword}</b>\n"
-                f"🎁 Подарок: {gift_link}\n\n"
-                f"👑 <b>Панель управления</b>\n"
-                f"👥 Лидов: <b>{stats['total']}</b> | 📅 Сегодня: <b>{stats['today']}</b>",
-                parse_mode="HTML",
-                reply_markup=keyboard
-            )
+                f"✅ <b>Добавлено!</b>\n\n🔑 Слово: <b>{keyword}</b>\n🎁 {gift_link}\n\n"
+                f"👑 <b>Панель управления</b>\n👥 Лидов: <b>{stats['total']}</b>",
+                parse_mode="HTML", reply_markup=admin_menu_keyboard())
+        else:
+            await update.message.reply_text("❌ Ошибка. Попробуй ещё раз.")
 
     elif state == "waiting_broadcast":
         message_text = update.message.text.strip()
@@ -399,209 +287,41 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("📭 База пуста.")
             context.user_data["admin_state"] = None
             return
-
         status = await update.message.reply_text(f"📤 Отправляю {len(leads)} людям...")
         sent = 0
         failed = 0
         for lead in leads:
             try:
-                await context.bot.send_message(
-                    chat_id=lead["telegram_id"],
-                    text=message_text,
-                    parse_mode="HTML"
-                )
+                await context.bot.send_message(chat_id=lead["telegram_id"], text=message_text, parse_mode="HTML")
                 sent += 1
             except Exception:
                 failed += 1
-
         conn = get_db()
-        conn.execute(
-            "INSERT INTO broadcasts (message, sent_at, sent_count) VALUES (?, ?, ?)",
-            (message_text, datetime.now().strftime("%Y-%m-%d %H:%M"), sent)
-        )
+        conn.execute("INSERT INTO broadcasts (message, sent_at, sent_count) VALUES (?, ?, ?)",
+                     (message_text, datetime.now().strftime("%Y-%m-%d %H:%M"), sent))
         conn.commit()
         conn.close()
-
         context.user_data["admin_state"] = None
-        stats = get_stats()
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
-             InlineKeyboardButton("👥 База лидов", callback_data="admin_leads")],
-            [InlineKeyboardButton("🔑 Кодовые слова", callback_data="admin_keywords"),
-             InlineKeyboardButton("➕ Добавить слово", callback_data="admin_addkw")],
-            [InlineKeyboardButton("📨 Сделать рассылку", callback_data="admin_broadcast")],
-        ])
         await status.edit_text(
-            f"✅ <b>Рассылка готова!</b>\n"
-            f"📤 Отправлено: <b>{sent}</b>\n"
-            f"❌ Ошибок: <b>{failed}</b>",
-            parse_mode="HTML",
-            reply_markup=keyboard
-        )
-    await update.message.reply_text("Отменил. Напиши /start чтобы начать заново.")
-    return ConversationHandler.END
-
-# ─── ADMIN COMMANDS ───────────────────────────────────────────
-
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    stats = get_stats()
-    text = (
-        f"📊 <b>Статистика бота</b>\n\n"
-        f"👥 Всего лидов: <b>{stats['total']}</b>\n"
-        f"📅 Сегодня: <b>{stats['today']}</b>\n"
-        f"📨 Рассылок: <b>{stats['broadcasts']}</b>\n\n"
-    )
-    if stats["by_keyword"]:
-        text += "🔑 <b>По кодовым словам:</b>\n"
-        for row in stats["by_keyword"]:
-            text += f"  • <b>{row['keyword']}</b> — {row['cnt']} чел.\n"
-    text += "\n<b>Команды:</b>\n"
-    text += "/addkeyword — добавить кодовое слово\n"
-    text += "/keywords — список активных слов\n"
-    text += "/delkeyword — удалить слово\n"
-    text += "/broadcast — рассылка по базе\n"
-    text += "/leads — последние 10 лидов"
-    await update.message.reply_text(text, parse_mode="HTML")
-
-async def admin_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    leads = get_all_leads()[:10]
-    if not leads:
-        await update.message.reply_text("📭 База пуста.")
-        return
-    text = f"👥 <b>Последние {len(leads)} лидов:</b>\n\n"
-    for i, lead in enumerate(leads, 1):
-        tg = f"@{lead['username']}" if lead['username'] else f"id{lead['telegram_id']}"
-        text += f"{i}. {lead['first_name']} ({tg})\n   📧 {lead['email']} | 🔑 {lead['keyword']} | 🕐 {lead['joined_at']}\n\n"
-    await update.message.reply_text(text, parse_mode="HTML")
-
-async def admin_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    keywords = get_keywords()
-    if not keywords:
-        await update.message.reply_text("Активных кодовых слов нет. Добавь через /addkeyword")
-        return
-    text = "🔑 <b>Активные кодовые слова:</b>\n\n"
-    for kw in keywords:
-        text += f"• <b>{kw['word']}</b>\n  🎁 {kw['gift_link']}\n  📅 {kw['created_at']}\n\n"
-    await update.message.reply_text(text, parse_mode="HTML")
-
-async def admin_addkeyword_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return ConversationHandler.END
-    await update.message.reply_text(
-        "🔑 Напиши новое кодовое слово:\n"
-        "(например: <code>контент2024</code>)",
-        parse_mode="HTML"
-    )
-    return ADMIN_SET_KEYWORD
-
-async def admin_addkeyword_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_keyword"] = update.message.text.strip().lower()
-    await update.message.reply_text(
-        f"✅ Слово: <b>{context.user_data['new_keyword']}</b>\n\n"
-        f"Теперь напиши ссылку на подарок для этого слова:",
-        parse_mode="HTML"
-    )
-    return ADMIN_SET_GIFT
-
-async def admin_addkeyword_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    gift_link = update.message.text.strip()
-    keyword = context.user_data.get("new_keyword", "")
-
-    if add_keyword(keyword, gift_link):
-        await update.message.reply_text(
-            f"✅ <b>Добавлено!</b>\n\n"
-            f"🔑 Слово: <b>{keyword}</b>\n"
-            f"🎁 Подарок: {gift_link}\n\n"
-            f"Теперь пользователи могут написать это слово и получить подарок!",
-            parse_mode="HTML"
-        )
-    else:
-        await update.message.reply_text("❌ Ошибка при добавлении. Попробуй ещё раз.")
-    return ConversationHandler.END
+            f"✅ <b>Рассылка готова!</b>\n📤 Отправлено: <b>{sent}</b>\n❌ Ошибок: <b>{failed}</b>",
+            parse_mode="HTML", reply_markup=admin_menu_keyboard())
 
 async def admin_delkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if update.effective_user.id not in ADMIN_IDS:
         return
     args = context.args
     if not args:
-        await update.message.reply_text(
-            "Использование: <code>/delkeyword слово</code>",
-            parse_mode="HTML"
-        )
+        await update.message.reply_text("Использование: <code>/delkeyword слово</code>", parse_mode="HTML")
         return
     word = " ".join(args).strip().lower()
     deactivate_keyword(word)
-    await update.message.reply_text(f"✅ Слово <b>{word}</b> деактивировано.", parse_mode="HTML")
-
-async def admin_broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return ConversationHandler.END
-    stats = get_stats()
-    await update.message.reply_text(
-        f"📨 <b>Рассылка по базе</b>\n\n"
-        f"В базе: <b>{stats['total']}</b> человек\n\n"
-        f"Напиши текст сообщения.\n"
-        f"Поддерживается HTML: <code>&lt;b&gt;жирный&lt;/b&gt;</code>, <code>&lt;a href='...'&gt;ссылка&lt;/a&gt;</code>\n\n"
-        f"Или /cancel для отмены:",
-        parse_mode="HTML"
-    )
-    return ADMIN_BROADCAST
-
-async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_text = update.message.text.strip()
-    leads = get_all_leads()
-
-    if not leads:
-        await update.message.reply_text("📭 База пуста.")
-        return ConversationHandler.END
-
-    status = await update.message.reply_text(f"📤 Отправляю {len(leads)} людям...")
-
-    sent = 0
-    failed = 0
-    for lead in leads:
-        try:
-            await context.bot.send_message(
-                chat_id=lead["telegram_id"],
-                text=message_text,
-                parse_mode="HTML"
-            )
-            sent += 1
-        except Exception:
-            failed += 1
-
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO broadcasts (message, sent_at, sent_count) VALUES (?, ?, ?)",
-        (message_text, datetime.now().strftime("%Y-%m-%d %H:%M"), sent)
-    )
-    conn.commit()
-    conn.close()
-
-    await status.edit_text(
-        f"✅ <b>Рассылка завершена!</b>\n"
-        f"📤 Отправлено: {sent}\n"
-        f"❌ Ошибок: {failed}",
-        parse_mode="HTML"
-    )
-    return ConversationHandler.END
-
-# ─── MAIN ────────────────────────────────────────────────────
+    await update.message.reply_text(f"✅ Слово <b>{word}</b> удалено.", parse_mode="HTML",
+                                    reply_markup=admin_menu_keyboard())
 
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # User conversation
     user_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -613,33 +333,7 @@ def main():
         allow_reentry=True
     )
 
-    # Admin add keyword conversation
-    addkw_conv = ConversationHandler(
-        entry_points=[CommandHandler("addkeyword", admin_addkeyword_start)],
-        states={
-            ADMIN_SET_KEYWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_addkeyword_word)],
-            ADMIN_SET_GIFT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_addkeyword_gift)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    )
-
-    # Admin broadcast conversation
-    broadcast_conv = ConversationHandler(
-        entry_points=[CommandHandler("broadcast", admin_broadcast_start)],
-        states={
-            ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_send)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    )
-
     app.add_handler(user_conv)
-    app.add_handler(addkw_conv)
-    app.add_handler(broadcast_conv)
-    app.add_handler(CommandHandler("stats", admin_stats))
-    app.add_handler(CommandHandler("leads", admin_leads))
-    app.add_handler(CommandHandler("keywords", admin_keywords))
     app.add_handler(CommandHandler("delkeyword", admin_delkeyword))
     app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^admin_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
