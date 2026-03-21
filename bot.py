@@ -4,11 +4,10 @@
 """
 
 import logging
-import asyncio
 import os
 import sqlite3
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
@@ -423,7 +422,7 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ─── MAIN ────────────────────────────────────────────────────
 
-async def main():
+def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -469,16 +468,7 @@ async def main():
     app.add_handler(CommandHandler("delkeyword", admin_delkeyword))
 
     logger.info("✅ Бот запущен — @ai_topkontentbot")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    await app.updater.idle()
-    await app.stop()
+    app.run_polling()
 
 if __name__ == "__main__":
-    import sys
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(main())
+    main()
