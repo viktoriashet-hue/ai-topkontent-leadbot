@@ -469,7 +469,16 @@ async def main():
     app.add_handler(CommandHandler("delkeyword", admin_delkeyword))
 
     logger.info("✅ Бот запущен — @ai_topkontentbot")
-    await app.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
+    await app.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(main())
