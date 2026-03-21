@@ -154,6 +154,27 @@ def get_stats():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
+    if user.id in ADMIN_IDS:
+        stats = get_stats()
+        keyboard = [
+            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
+             InlineKeyboardButton("👥 База лидов", callback_data="admin_leads")],
+            [InlineKeyboardButton("🔑 Кодовые слова", callback_data="admin_keywords"),
+             InlineKeyboardButton("➕ Добавить слово", callback_data="admin_addkw")],
+            [InlineKeyboardButton("📨 Сделать рассылку", callback_data="admin_broadcast")],
+        ]
+        await update.message.reply_text(
+            f"👑 <b>Панель управления</b>\n\n"
+            f"👥 Лидов в базе: <b>{stats['total']}</b>\n"
+            f"📅 Сегодня пришло: <b>{stats['today']}</b>\n"
+            f"🔑 Активных слов: <b>{len(get_keywords())}</b>\n\n"
+            f"Выбери действие 👇",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
     keyboard = [
         [InlineKeyboardButton("✅ Принимаю условия", callback_data="consent_yes")],
         [InlineKeyboardButton("❌ Нет, не согласна", callback_data="consent_no")],
@@ -262,7 +283,161 @@ async def handle_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id not in ADMIN_IDS:
+        return
+
+    def admin_keyboard():
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
+             InlineKeyboardButton("👥 База лидов", callback_data="admin_leads")],
+            [InlineKeyboardButton("🔑 Кодовые слова", callback_data="admin_keywords"),
+             InlineKeyboardButton("➕ Добавить слово", callback_data="admin_addkw")],
+            [InlineKeyboardButton("📨 Сделать рассылку", callback_data="admin_broadcast")],
+        ])
+
+    if query.data == "admin_stats":
+        stats = get_stats()
+        text = (
+            f"📊 <b>Статистика</b>\n\n"
+            f"👥 Всего лидов: <b>{stats['total']}</b>\n"
+            f"📅 Сегодня: <b>{stats['today']}</b>\n"
+            f"📨 Рассылок: <b>{stats['broadcasts']}</b>\n"
+        )
+        if stats["by_keyword"]:
+            text += "\n🔑 <b>По кодовым словам:</b>\n"
+            for row in stats["by_keyword"]:
+                text += f"  • <b>{row['keyword']}</b> — {row['cnt']} чел.\n"
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
+
+    elif query.data == "admin_leads":
+        leads = get_all_leads()[:10]
+        if not leads:
+            text = "📭 База пуста."
+        else:
+            text = f"👥 <b>Последние {len(leads)} лидов:</b>\n\n"
+            for i, lead in enumerate(leads, 1):
+                tg = f"@{lead['username']}" if lead['username'] else f"id{lead['telegram_id']}"
+                text += f"{i}. {lead['first_name']} ({tg})\n   📧 {lead['email']} | 🔑 {lead['keyword']} | {lead['joined_at']}\n\n"
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
+
+    elif query.data == "admin_keywords":
+        keywords = get_keywords()
+        if not keywords:
+            text = "🔑 Активных слов нет.\nНажми ➕ чтобы добавить."
+        else:
+            text = "🔑 <b>Активные кодовые слова:</b>\n\n"
+            for kw in keywords:
+                text += f"• <b>{kw['word']}</b>\n  🎁 {kw['gift_link']}\n\n"
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_keyboard())
+
+    elif query.data == "admin_addkw":
+        await query.edit_message_text(
+            "🔑 Напиши новое кодовое слово:\n(например: <code>контент2024</code>)\n\nИли /cancel для отмены",
+            parse_mode="HTML"
+        )
+        context.user_data["admin_state"] = "waiting_new_keyword"
+
+    elif query.data == "admin_broadcast":
+        stats = get_stats()
+        await query.edit_message_text(
+            f"📨 <b>Рассылка</b>\n\n"
+            f"В базе: <b>{stats['total']}</b> человек\n\n"
+            f"Напиши текст сообщения и я отправлю всем.\n"
+            f"Или /cancel для отмены:",
+            parse_mode="HTML"
+        )
+        context.user_data["admin_state"] = "waiting_broadcast"
+
+
+async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles text input for admin inline flows (addkeyword, broadcast)"""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+
+    state = context.user_data.get("admin_state")
+
+    if state == "waiting_new_keyword":
+        context.user_data["new_keyword"] = update.message.text.strip().lower()
+        context.user_data["admin_state"] = "waiting_new_gift"
+        await update.message.reply_text(
+            f"✅ Слово: <b>{context.user_data['new_keyword']}</b>\n\n"
+            f"Теперь напиши ссылку на подарок для этого слова:",
+            parse_mode="HTML"
+        )
+
+    elif state == "waiting_new_gift":
+        gift_link = update.message.text.strip()
+        keyword = context.user_data.get("new_keyword", "")
+        if add_keyword(keyword, gift_link):
+            context.user_data["admin_state"] = None
+            stats = get_stats()
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
+                 InlineKeyboardButton("👥 База лидов", callback_data="admin_leads")],
+                [InlineKeyboardButton("🔑 Кодовые слова", callback_data="admin_keywords"),
+                 InlineKeyboardButton("➕ Добавить слово", callback_data="admin_addkw")],
+                [InlineKeyboardButton("📨 Сделать рассылку", callback_data="admin_broadcast")],
+            ])
+            await update.message.reply_text(
+                f"✅ <b>Добавлено!</b>\n\n"
+                f"🔑 Слово: <b>{keyword}</b>\n"
+                f"🎁 Подарок: {gift_link}\n\n"
+                f"👑 <b>Панель управления</b>\n"
+                f"👥 Лидов: <b>{stats['total']}</b> | 📅 Сегодня: <b>{stats['today']}</b>",
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+
+    elif state == "waiting_broadcast":
+        message_text = update.message.text.strip()
+        leads = get_all_leads()
+        if not leads:
+            await update.message.reply_text("📭 База пуста.")
+            context.user_data["admin_state"] = None
+            return
+
+        status = await update.message.reply_text(f"📤 Отправляю {len(leads)} людям...")
+        sent = 0
+        failed = 0
+        for lead in leads:
+            try:
+                await context.bot.send_message(
+                    chat_id=lead["telegram_id"],
+                    text=message_text,
+                    parse_mode="HTML"
+                )
+                sent += 1
+            except Exception:
+                failed += 1
+
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO broadcasts (message, sent_at, sent_count) VALUES (?, ?, ?)",
+            (message_text, datetime.now().strftime("%Y-%m-%d %H:%M"), sent)
+        )
+        conn.commit()
+        conn.close()
+
+        context.user_data["admin_state"] = None
+        stats = get_stats()
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats"),
+             InlineKeyboardButton("👥 База лидов", callback_data="admin_leads")],
+            [InlineKeyboardButton("🔑 Кодовые слова", callback_data="admin_keywords"),
+             InlineKeyboardButton("➕ Добавить слово", callback_data="admin_addkw")],
+            [InlineKeyboardButton("📨 Сделать рассылку", callback_data="admin_broadcast")],
+        ])
+        await status.edit_text(
+            f"✅ <b>Рассылка готова!</b>\n"
+            f"📤 Отправлено: <b>{sent}</b>\n"
+            f"❌ Ошибок: <b>{failed}</b>",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
     await update.message.reply_text("Отменил. Напиши /start чтобы начать заново.")
     return ConversationHandler.END
 
@@ -466,6 +641,8 @@ def main():
     app.add_handler(CommandHandler("leads", admin_leads))
     app.add_handler(CommandHandler("keywords", admin_keywords))
     app.add_handler(CommandHandler("delkeyword", admin_delkeyword))
+    app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^admin_"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
 
     logger.info("✅ Бот запущен — @ai_topkontentbot")
     app.run_polling()
