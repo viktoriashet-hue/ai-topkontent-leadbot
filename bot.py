@@ -308,6 +308,52 @@ async def admin_delkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     deactivate_keyword(" ".join(args))
     await update.message.reply_text(f"✅ Слово <b>{' '.join(args)}</b> удалено.", parse_mode="HTML", reply_markup=admin_menu_keyboard())
 
+
+async def admin_addlead(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    # Usage: /addlead @username email keyword
+    # Example: /addlead @Elmira_Begaliyeva Emika-86@mail.ru Тредс
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text(
+            "Использование:\n"
+            "<code>/addlead @username email кодовое_слово</code>\n\n"
+            "Пример:\n"
+            "<code>/addlead @Elmira_Begaliyeva Emika-86@mail.ru Тредс</code>\n\n"
+            "Если нет username — пиши id:\n"
+            "<code>/addlead id123456 email@mail.ru Тредс</code>",
+            parse_mode="HTML")
+        return
+    
+    tg_ref = args[0]  # @username или id123456
+    email = args[1]
+    keyword = " ".join(args[2:])
+    
+    # Определяем telegram_id и username
+    if tg_ref.startswith("@"):
+        username = tg_ref[1:]
+        telegram_id = 0  # неизвестен
+        first_name = username
+    elif tg_ref.startswith("id"):
+        telegram_id = int(tg_ref[2:])
+        username = ""
+        first_name = f"id{telegram_id}"
+    else:
+        username = tg_ref
+        telegram_id = 0
+        first_name = username
+    
+    save_lead(telegram_id, username, first_name, email, keyword)
+    stats = get_stats()
+    await update.message.reply_text(
+        f"✅ <b>Лид добавлен!</b>\n\n"
+        f"👤 {first_name}\n"
+        f"📧 {email}\n"
+        f"🔑 {keyword}\n\n"
+        f"👥 Всего в базе: <b>{stats['total']}</b>",
+        parse_mode="HTML", reply_markup=admin_menu_keyboard())
+
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
@@ -323,6 +369,7 @@ def main():
     )
     app.add_handler(user_conv)
     app.add_handler(CommandHandler("delkeyword", admin_delkeyword))
+    app.add_handler(CommandHandler("addlead", admin_addlead))
     app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^admin_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
     logger.info("✅ Бот запущен — @ai_topkontentbot")
