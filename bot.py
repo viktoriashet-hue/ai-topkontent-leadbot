@@ -1,10 +1,11 @@
 """
-@ai_topkontentbot — Lead Bot
+@ai_topkontentbot — Lead Bot с PostgreSQL
 """
 
 import logging
 import os
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -16,6 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8142618101:AAGpKeRBP6oQrVUxIMhMBkQAahhl11ZIkyA")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:HkvsvVVSnPpCIrPMgsWXnSKMvYSSKhFl@postgres.railway.internal:5432/railway")
 ADMIN_IDS = [327487258]
 
 WAITING_CONSENT = 1
@@ -23,39 +25,45 @@ WAITING_KEYWORD = 2
 WAITING_EMAIL = 3
 
 def get_db():
-    conn = sqlite3.connect("leads.db")
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
     conn = get_db()
-    conn.execute("""CREATE TABLE IF NOT EXISTS leads (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER, username TEXT, first_name TEXT,
+    cur = conn.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS leads (
+        id SERIAL PRIMARY KEY,
+        telegram_id BIGINT, username TEXT, first_name TEXT,
         email TEXT, keyword TEXT, joined_at TEXT)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS keywords (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cur.execute("""CREATE TABLE IF NOT EXISTS keywords (
+        id SERIAL PRIMARY KEY,
         word TEXT UNIQUE, gift_link TEXT, created_at TEXT, is_active INTEGER DEFAULT 1)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS broadcasts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cur.execute("""CREATE TABLE IF NOT EXISTS broadcasts (
+        id SERIAL PRIMARY KEY,
         message TEXT, sent_at TEXT, sent_count INTEGER DEFAULT 0)""")
-    existing = conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
-    if existing == 0:
-        conn.execute("INSERT INTO keywords (word, gift_link, created_at, is_active) VALUES (?, ?, ?, 1)",
-                     ("подарок", "https://your-gift-link.com", datetime.now().strftime("%Y-%m-%d %H:%M")))
+    cur.execute("SELECT COUNT(*) FROM keywords")
+    count = cur.fetchone()["count"]
+    if count == 0:
+        cur.execute("INSERT INTO keywords (word, gift_link, created_at, is_active) VALUES (%s, %s, %s, 1)",
+                    ("подарок", "https://your-gift-link.com", datetime.now().strftime("%Y-%m-%d %H:%M")))
     conn.commit()
+    cur.close()
     conn.close()
 
 def get_keywords():
     conn = get_db()
-    rows = conn.execute("SELECT * FROM keywords WHERE is_active = 1").fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM keywords WHERE is_active = 1")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return rows
 
 def get_gift_by_keyword(word):
     conn = get_db()
-    # SQLite LOWER() не работает с кириллицей — сравниваем через Python
-    rows = conn.execute("SELECT word, gift_link FROM keywords WHERE is_active = 1").fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT word, gift_link FROM keywords WHERE is_active = 1")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     word_lower = word.strip().lower()
     for row in rows:
@@ -65,55 +73,73 @@ def get_gift_by_keyword(word):
 
 def add_keyword(word, gift_link):
     conn = get_db()
+    cur = conn.cursor()
     try:
-        conn.execute("INSERT OR REPLACE INTO keywords (word, gift_link, created_at, is_active) VALUES (?, ?, ?, 1)",
-                     (word.strip().lower(), gift_link, datetime.now().strftime("%Y-%m-%d %H:%M")))
+        cur.execute("INSERT INTO keywords (word, gift_link, created_at, is_active) VALUES (%s, %s, %s, 1) ON CONFLICT (word) DO UPDATE SET gift_link=%s, is_active=1",
+                    (word.strip().lower(), gift_link, datetime.now().strftime("%Y-%m-%d %H:%M"), gift_link))
         conn.commit()
         return True
     except Exception as e:
         logger.error(e)
         return False
     finally:
+        cur.close()
         conn.close()
 
 def deactivate_keyword(word):
     conn = get_db()
-    rows = conn.execute("SELECT id, word FROM keywords WHERE is_active = 1").fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT id, word FROM keywords WHERE is_active = 1")
+    rows = cur.fetchall()
     word_lower = word.strip().lower()
     for row in rows:
         if row["word"].lower() == word_lower:
-            conn.execute("UPDATE keywords SET is_active = 0 WHERE id = ?", (row["id"],))
+            cur.execute("UPDATE keywords SET is_active = 0 WHERE id = %s", (row["id"],))
             break
     conn.commit()
+    cur.close()
     conn.close()
 
 def save_lead(telegram_id, username, first_name, email, keyword):
     conn = get_db()
-    conn.execute("INSERT INTO leads (telegram_id, username, first_name, email, keyword, joined_at) VALUES (?, ?, ?, ?, ?, ?)",
-                 (telegram_id, username or "", first_name or "", email, keyword, datetime.now().strftime("%Y-%m-%d %H:%M")))
+    cur = conn.cursor()
+    cur.execute("INSERT INTO leads (telegram_id, username, first_name, email, keyword, joined_at) VALUES (%s, %s, %s, %s, %s, %s)",
+                (telegram_id, username or "", first_name or "", email, keyword, datetime.now().strftime("%Y-%m-%d %H:%M")))
     conn.commit()
+    cur.close()
     conn.close()
 
 def already_got_gift(telegram_id, keyword):
     conn = get_db()
-    rows = conn.execute("SELECT keyword FROM leads WHERE telegram_id = ?", (telegram_id,)).fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT keyword FROM leads WHERE telegram_id = %s", (telegram_id,))
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     keyword_lower = keyword.strip().lower()
     return any(r["keyword"].lower() == keyword_lower for r in rows)
 
 def get_all_leads():
     conn = get_db()
-    rows = conn.execute("SELECT * FROM leads ORDER BY joined_at DESC").fetchall()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM leads ORDER BY joined_at DESC")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return rows
 
 def get_stats():
     conn = get_db()
-    total = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
-    today = conn.execute("SELECT COUNT(*) FROM leads WHERE joined_at LIKE ?",
-                         (datetime.now().strftime("%Y-%m-%d") + "%",)).fetchone()[0]
-    by_keyword = conn.execute("SELECT keyword, COUNT(*) as cnt FROM leads GROUP BY keyword ORDER BY cnt DESC").fetchall()
-    broadcasts = conn.execute("SELECT COUNT(*) FROM broadcasts").fetchone()[0]
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM leads")
+    total = cur.fetchone()["count"]
+    cur.execute("SELECT COUNT(*) FROM leads WHERE joined_at LIKE %s", (datetime.now().strftime("%Y-%m-%d") + "%",))
+    today = cur.fetchone()["count"]
+    cur.execute("SELECT keyword, COUNT(*) as cnt FROM leads GROUP BY keyword ORDER BY cnt DESC")
+    by_keyword = cur.fetchall()
+    cur.execute("SELECT COUNT(*) FROM broadcasts")
+    broadcasts = cur.fetchone()["count"]
+    cur.close()
     conn.close()
     return {"total": total, "today": today, "by_keyword": by_keyword, "broadcasts": broadcasts}
 
@@ -134,20 +160,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👑 <b>Панель управления</b>\n\n"
             f"👥 Лидов в базе: <b>{stats['total']}</b>\n"
             f"📅 Сегодня пришло: <b>{stats['today']}</b>\n"
-            f"🔑 Активных слов: <b>{len(get_keywords())}</b>\n\n"
-            f"Выбери действие 👇",
+            f"🔑 Активных слов: <b>{len(get_keywords())}</b>\n\nВыбери действие 👇",
             parse_mode="HTML", reply_markup=admin_menu_keyboard())
         return ConversationHandler.END
-
     keyboard = [
         [InlineKeyboardButton("✅ Принимаю условия", callback_data="consent_yes")],
         [InlineKeyboardButton("❌ Нет, спасибо", callback_data="consent_no")],
     ]
     await update.message.reply_text(
-        f"👋 Привет, {user.first_name}!\n\n"
-        f"Этот бот отправляет полезные материалы по контенту.\n\n"
-        f"📌 Нажимая <b>«Принимаю условия»</b>, ты соглашаешься получать "
-        f"сообщения и рассылки от этого бота.\n\nПродолжим?",
+        f"👋 Привет, {user.first_name}!\n\nЭтот бот отправляет полезные материалы по контенту.\n\n"
+        f"📌 Нажимая <b>«Принимаю условия»</b>, ты соглашаешься получать сообщения и рассылки от этого бота.\n\nПродолжим?",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     return WAITING_CONSENT
 
@@ -170,9 +192,7 @@ async def handle_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         context.user_data["keyword"] = text
         context.user_data["gift_link"] = gift_link
-        await update.message.reply_text(
-            "✅ Верно! Почти готово.\n\n📧 Напиши свой <b>email</b> — и сразу получишь подарок:",
-            parse_mode="HTML")
+        await update.message.reply_text("✅ Верно! Почти готово.\n\n📧 Напиши свой <b>email</b> — и сразу получишь подарок:", parse_mode="HTML")
         return WAITING_EMAIL
     else:
         await update.message.reply_text("🤔 Не знаю такого кодового слова. Попробуй ещё раз!")
@@ -191,8 +211,7 @@ async def handle_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for admin_id in ADMIN_IDS:
         try:
             tg_link = f"@{user.username}" if user.username else f"id{user.id}"
-            await context.bot.send_message(
-                chat_id=admin_id,
+            await context.bot.send_message(chat_id=admin_id,
                 text=f"🔔 <b>Новый лид!</b>\n👤 {user.first_name} ({tg_link})\n📧 {email}\n🔑 Слово: <b>{keyword}</b>\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}",
                 parse_mode="HTML")
         except Exception as e:
@@ -209,77 +228,50 @@ async def admin_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     if query.from_user.id not in ADMIN_IDS:
         return
-
     if query.data == "admin_stats":
         stats = get_stats()
-        text = (f"📊 <b>Статистика</b>\n\n👥 Всего лидов: <b>{stats['total']}</b>\n"
-                f"📅 Сегодня: <b>{stats['today']}</b>\n📨 Рассылок: <b>{stats['broadcasts']}</b>\n")
+        text = f"📊 <b>Статистика</b>\n\n👥 Всего: <b>{stats['total']}</b>\n📅 Сегодня: <b>{stats['today']}</b>\n📨 Рассылок: <b>{stats['broadcasts']}</b>\n"
         if stats["by_keyword"]:
             text += "\n🔑 <b>По кодовым словам:</b>\n"
             for row in stats["by_keyword"]:
                 text += f"  • <b>{row['keyword']}</b> — {row['cnt']} чел.\n"
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_menu_keyboard())
-
     elif query.data == "admin_leads":
         leads = get_all_leads()[:10]
-        if not leads:
-            text = "📭 База пуста."
-        else:
-            text = f"👥 <b>Последние {len(leads)} лидов:</b>\n\n"
-            for i, lead in enumerate(leads, 1):
-                tg = f"@{lead['username']}" if lead['username'] else f"id{lead['telegram_id']}"
-                text += f"{i}. {lead['first_name']} ({tg})\n   📧 {lead['email']} | 🔑 {lead['keyword']} | {lead['joined_at']}\n\n"
+        text = "📭 База пуста." if not leads else f"👥 <b>Последние {len(leads)} лидов:</b>\n\n" + "".join(
+            f"{i}. {l['first_name']} (@{l['username'] or l['telegram_id']})\n   📧 {l['email']} | 🔑 {l['keyword']} | {l['joined_at']}\n\n"
+            for i, l in enumerate(leads, 1))
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_menu_keyboard())
-
     elif query.data == "admin_keywords":
         keywords = get_keywords()
-        if not keywords:
-            text = "🔑 Активных слов нет.\nНажми ➕ чтобы добавить."
-        else:
-            text = "🔑 <b>Активные кодовые слова:</b>\n\n"
-            for kw in keywords:
-                text += f"• <b>{kw['word']}</b>\n  🎁 {kw['gift_link']}\n\n"
+        text = "🔑 Активных слов нет.\nНажми ➕ чтобы добавить." if not keywords else "🔑 <b>Активные кодовые слова:</b>\n\n" + "".join(f"• <b>{kw['word']}</b>\n  🎁 {kw['gift_link']}\n\n" for kw in keywords)
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=admin_menu_keyboard())
-
     elif query.data == "admin_addkw":
-        await query.edit_message_text(
-            "🔑 Напиши новое кодовое слово:\n(например: <code>контент2024</code>)\n\nИли /cancel для отмены",
-            parse_mode="HTML")
+        await query.edit_message_text("🔑 Напиши новое кодовое слово:\n(например: <code>контент2024</code>)\n\nИли /cancel для отмены", parse_mode="HTML")
         context.user_data["admin_state"] = "waiting_new_keyword"
-
     elif query.data == "admin_broadcast":
         stats = get_stats()
-        await query.edit_message_text(
-            f"📨 <b>Рассылка</b>\n\nВ базе: <b>{stats['total']}</b> человек\n\n"
-            f"Напиши текст сообщения и я отправлю всем.\nИли /cancel для отмены:",
-            parse_mode="HTML")
+        await query.edit_message_text(f"📨 <b>Рассылка</b>\n\nВ базе: <b>{stats['total']}</b> человек\n\nНапиши текст сообщения.\nИли /cancel для отмены:", parse_mode="HTML")
         context.user_data["admin_state"] = "waiting_broadcast"
 
 async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
     state = context.user_data.get("admin_state")
-
     if state == "waiting_new_keyword":
         context.user_data["new_keyword"] = update.message.text.strip().lower()
         context.user_data["admin_state"] = "waiting_new_gift"
-        await update.message.reply_text(
-            f"✅ Слово: <b>{context.user_data['new_keyword']}</b>\n\nТеперь напиши ссылку на подарок:",
-            parse_mode="HTML")
-
+        await update.message.reply_text(f"✅ Слово: <b>{context.user_data['new_keyword']}</b>\n\nТеперь напиши ссылку на подарок:", parse_mode="HTML")
     elif state == "waiting_new_gift":
         gift_link = update.message.text.strip()
         keyword = context.user_data.get("new_keyword", "")
         if add_keyword(keyword, gift_link):
             context.user_data["admin_state"] = None
             stats = get_stats()
-            await update.message.reply_text(
-                f"✅ <b>Добавлено!</b>\n\n🔑 Слово: <b>{keyword}</b>\n🎁 {gift_link}\n\n"
-                f"👑 <b>Панель управления</b>\n👥 Лидов: <b>{stats['total']}</b>",
+            await update.message.reply_text(f"✅ <b>Добавлено!</b>\n\n🔑 Слово: <b>{keyword}</b>\n🎁 {gift_link}\n\n👑 Лидов: <b>{stats['total']}</b>",
                 parse_mode="HTML", reply_markup=admin_menu_keyboard())
         else:
             await update.message.reply_text("❌ Ошибка. Попробуй ещё раз.")
-
     elif state == "waiting_broadcast":
         message_text = update.message.text.strip()
         leads = get_all_leads()
@@ -288,8 +280,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data["admin_state"] = None
             return
         status = await update.message.reply_text(f"📤 Отправляю {len(leads)} людям...")
-        sent = 0
-        failed = 0
+        sent = failed = 0
         for lead in leads:
             try:
                 await context.bot.send_message(chat_id=lead["telegram_id"], text=message_text, parse_mode="HTML")
@@ -297,13 +288,14 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception:
                 failed += 1
         conn = get_db()
-        conn.execute("INSERT INTO broadcasts (message, sent_at, sent_count) VALUES (?, ?, ?)",
-                     (message_text, datetime.now().strftime("%Y-%m-%d %H:%M"), sent))
+        cur = conn.cursor()
+        cur.execute("INSERT INTO broadcasts (message, sent_at, sent_count) VALUES (%s, %s, %s)",
+                    (message_text, datetime.now().strftime("%Y-%m-%d %H:%M"), sent))
         conn.commit()
+        cur.close()
         conn.close()
         context.user_data["admin_state"] = None
-        await status.edit_text(
-            f"✅ <b>Рассылка готова!</b>\n📤 Отправлено: <b>{sent}</b>\n❌ Ошибок: <b>{failed}</b>",
+        await status.edit_text(f"✅ <b>Рассылка готова!</b>\n📤 Отправлено: <b>{sent}</b>\n❌ Ошибок: <b>{failed}</b>",
             parse_mode="HTML", reply_markup=admin_menu_keyboard())
 
 async def admin_delkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -313,15 +305,12 @@ async def admin_delkeyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await update.message.reply_text("Использование: <code>/delkeyword слово</code>", parse_mode="HTML")
         return
-    word = " ".join(args).strip().lower()
-    deactivate_keyword(word)
-    await update.message.reply_text(f"✅ Слово <b>{word}</b> удалено.", parse_mode="HTML",
-                                    reply_markup=admin_menu_keyboard())
+    deactivate_keyword(" ".join(args))
+    await update.message.reply_text(f"✅ Слово <b>{' '.join(args)}</b> удалено.", parse_mode="HTML", reply_markup=admin_menu_keyboard())
 
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
-
     user_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -332,12 +321,10 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True
     )
-
     app.add_handler(user_conv)
     app.add_handler(CommandHandler("delkeyword", admin_delkeyword))
     app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^admin_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
-
     logger.info("✅ Бот запущен — @ai_topkontentbot")
     app.run_polling()
 
